@@ -43,7 +43,7 @@ async def get_users():
         ACTIVE_CONNECTIONS.labels(app="fastapi").dec()
 
 
-@app.post("/users/")
+@app.post("/users/", status_code=201)
 async def create_user(user: UserCreate, request: Request):
     ACTIVE_CONNECTIONS.labels(app="fastapi").inc()
     start_time = time.time()
