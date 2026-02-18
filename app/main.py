@@ -1,16 +1,58 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends
 from typing import List
 from fastapi.responses import Response
 from prometheus_client import Counter, generate_latest, Gauge, Histogram
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ConfigDict
+from sqlalchemy import Column, Integer, String, Float, create_engine
+from sqlalchemy.orm import Session, DeclarativeBase, sessionmaker
 import time
+import os
+
+
 
 app = FastAPI()
 
-fake_user_db = [
-    {"username": "ivan"},
-    {"username": "olga"},
-]
+# -------------------- Pydantic-схемы --------------------
+# Модель входных данных.
+# Модель для POST-запроса
+class UserCreate(BaseModel):
+    username: str
+
+class UserResponse(BaseModel):
+    username: str
+    id: int
+
+
+# Модель входных данных
+class ItemCreate(BaseModel):
+    name: str = Field(..., min_length=3, max_length=100)
+    price: float = Field(ge=0)
+
+
+
+# Модель ответа клиенту.
+class ItemResponse(BaseModel):
+    id: int = Field(..., description="ID товара")
+    name: str
+    price: float
+    model_config = ConfigDict(from_attributes=True)
+
+
+
+
+# -------------------- SQLAlchemy-модели -----------------
+class Base(DeclarativeBase):
+    pass
+
+class Item(Base):
+    __tablename__ = "items"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True, nullable=False)
+    price = Column(Float, nullable=False)
+
+# -------------------- Настройка БД ----------------------
+
+
 
 # Метрика для подсчёта запросов
 REQUESTS_TOTAL = Counter(
@@ -32,16 +74,7 @@ REQUEST_DURATION = Histogram(
     buckets=[0.1, 0.3, 0.5, 1.0, 2.0, 5.0]
 )
 
-# Модель для POST-запроса
-class UserCreate(BaseModel):
-    username: str
 
-class UserResponse(BaseModel):
-    username: str
-    id: int
-
-class UserListResponse(BaseModel):
-    users: List[UserResponse]
 
 @app.get("/users/", response_model=List[UserResponse], status_code=200)
 async def get_users():
