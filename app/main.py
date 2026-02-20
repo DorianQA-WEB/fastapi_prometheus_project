@@ -3,14 +3,10 @@ from typing import List
 from fastapi.responses import Response
 from prometheus_client import Counter, generate_latest, Gauge, Histogram
 from pydantic import BaseModel, Field, ConfigDict
-from sqlalchemy import Column, Integer, String, Float, create_engine
+from sqlalchemy import Column, Integer, String, Float, create_engine, select
 from sqlalchemy.orm import Session, DeclarativeBase, sessionmaker
 import time
 import os
-
-
-
-app = FastAPI()
 
 # -------------------- Pydantic-схемы --------------------
 # Модель входных данных.
@@ -38,8 +34,6 @@ class ItemResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-
-
 # -------------------- SQLAlchemy-модели -----------------
 class Base(DeclarativeBase):
     pass
@@ -50,8 +44,27 @@ class Item(Base):
     name = Column(String, index=True, nullable=False)
     price = Column(Float, nullable=False)
 
-# -------------------- Настройка БД ----------------------
+class User(Base):
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, index=True)
 
+# -------------------- Настройка БД ----------------------
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./default.db")
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Создаём схему при старте.
+Base.metadata.create_all(bind=engine)
+
+# -------------------- DI: выдача сессии -----------------
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+app = FastAPI()
 
 
 # Метрика для подсчёта запросов
@@ -74,16 +87,31 @@ REQUEST_DURATION = Histogram(
     buckets=[0.1, 0.3, 0.5, 1.0, 2.0, 5.0]
 )
 
+@app.get("/items/{item_id}", response_model=ItemResponse)
+async def get_item(item_id: int, db: Session = Depends(get_db)):
+    item = db.query(Item).filter(Item.id == item_id).first()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return item
+
+@app.post("/items/", response_model=ItemResponse)
+async def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    db_item = Item(name=item.name, price=item.price)
+    db.add(db_item)
+    db.commit()
+    db.refresh(db_item)
+    return db_item
 
 
 @app.get("/users/", response_model=List[UserResponse], status_code=200)
-async def get_users():
+async def get_users(db: Session = Depends(get_db)):
     ACTIVE_CONNECTIONS.labels(app="fastapi").inc()
     start_time = time.time()
     try:
         REQUESTS_TOTAL.labels(method="GET", endpoint="/users/", status_code=200).inc()
         REQUEST_DURATION.labels(method="GET", endpoint="/users/").observe(time.time() - start_time)
-        return fake_user_db
+        result = db.scalars(select(User)).all()
+        return result
     finally:
         ACTIVE_CONNECTIONS.labels(app="fastapi").dec()
 
@@ -91,7 +119,7 @@ async def get_users():
 @app.post("/users/", status_code=201, response_model=UserResponse)
 async def create_user(user: UserCreate,
                       request: Request,
-                      db: fake_user_db):
+                      db: Session = Depends(get_db)):
     ACTIVE_CONNECTIONS.labels(app="fastapi").inc()
     start_time = time.time()
     try:
@@ -101,8 +129,14 @@ async def create_user(user: UserCreate,
             raise HTTPException(status_code=400, detail="Username is too short")
         REQUESTS_TOTAL.labels(method="POST", endpoint="/users/", status_code=201).inc()
         REQUEST_DURATION.labels(method="POST", endpoint="/users/").observe(time.time() - start_time)
-        fake_user_db.append(user)
-        return {"message": "User created", "username": user.username}
+        result = db.scalars(select(User).where(User.username == user.username))
+        if result.first():
+            raise HTTPException(status_code=400, detail="Username already exists")
+        db_user = User(username=user.username)
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+        return db_user
     finally:
         ACTIVE_CONNECTIONS.labels(app="fastapi").dec()
 
